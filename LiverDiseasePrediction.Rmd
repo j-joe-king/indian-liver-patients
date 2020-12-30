@@ -1,0 +1,312 @@
+---
+title: "Prediction of Liver Disease From Blood Markers"
+author: "Joe King"
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output: 
+  pdf_document:
+    latex_engine: xelatex
+    number_sections: TRUE
+    toc: TRUE
+mainfont: Tahoma
+fontsize: 12
+urlcolor: blue
+papersize: a4
+header-includes:
+- \usepackage{graphicx}
+- \usepackage{float}
+---
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(knitr)
+library(grid)
+library(gridExtra)
+knitr::opts_chunk$set(echo = TRUE)
+load("./rdas/data_summary.rda")
+load("./rdas/base_levels.rda")
+load("./rdas/train_knn_all_markers.rda")
+load("./rdas/train_knn_non_protein_markers.rda")
+load("./rdas/train_rf_all_markers.rda")
+load("./rdas/train_rf_non_protein_markers.rda")
+```
+
+# Introduction and Background
+
+The purpose of this report is to examine the Indian Liver Patient data available at https://archive.ics.uci.edu/ml/datasets/ILPD+(Indian+Liver+Patient+Dataset) to determine a model for predicting the presence of liver disease from patients' blood enzyme and protein levels.
+
+For non-clinicians it is useful to include a little background about how levels of proteins and enzymes in the blood are used by clinicians as indicators of liver malfunction.
+
+Elevated levels of the enzymes alamine aminotransferase (ALT, also known as alanine transaminase), aspartate aminotransferase (AST, also known as aspartate transaminase) and alkaline phosphotase (APT) are considerered markers for liver disease. 
+
+So too are depleted levels of total proteins and albumin, and, on the other hand, elevated levels of billirubin.
+
+Also used by clinicians to distinguish between types of liver disease are the AST/ALT ratio with high values indicating possible alcohol-related disease. 
+
+The Albumin/Globulin ratio (AGR) is a measure which in conjunction with the absolute levels of proteins in the blood can indicate various conditions including liver disease, if the ratio is significantly different from the normal level of just over 1.
+
+Sources: 
+
+Mayo Clinic https://www.mayoclinic.org/tests-procedures/liver-function-tests/about/pac-20394595)
+Wikipedia https://en.wikipedia.org/wiki/AST/ALT_ratio
+
+\newpage
+
+# Data Analysis
+
+## Data Breakdown and Cleaning
+
+```{r data_summary, echo = FALSE}
+t1 <- data_summary[1,-1]
+
+kable(t1, caption = "Summary of Indian Liver Patient Data",
+      col.names = c("No of Patients", "Total Males", "Total Females", "Males With Liver Disease", "Females With Liver Disease"))
+```
+
+The above table shows the breakdown of the patients included in the Indian Liver Patient data. For each patient the following data items are included:
+
+>    Age  
+>    Gender  
+>    Total Billirubin (TBIL)  
+>    Direct Billirubin (DBI)   
+>    Alkaline Phosphotase (APT)  
+>    Alamine Aminotransferase (ALT)  
+>    Aspartate Aminotransferase (AST)  
+>    Total Proteins (TP)  
+>    Albumin (ALB)  
+>    Albumin/Glolbulin Ratio (AGR)  
+>    Selector For Liver Disease  
+
+
+Inspection of the data revealed only four patients with missing data: for these, no Albumin/Globulin Ratio (AGR) was present. Instead of ignoring these patients, the Albumin/Globulin Ratio was estimated using the formula:
+
+$\textbf{AGR} = \frac {\textbf{ALB}}{\textbf {TP} - \textbf {ALB}}$
+
+This is not as accurate as for the other patient records as TP and ALB data are already rounded to 2 significant figures, but it is the best estimate.
+
+The AST/ALT Ratio is not included with the patient records, but for the purposes of this study it was calculated to see if it can help in predictions.  
+
+## Division into Training and Test Datasets
+
+The original dataset was divided randomly into training and test partitions. 90% of the original dataset was allocated to training data used for developing the predictive model and the remaining 10% to test data for testing the developed model. Table 2 shows the breakdown.
+
+```{r test_train_split_summary, echo = FALSE}
+t2 <- data_summary[-1,]
+
+kable(t2, caption = "Summary of Indian Liver Patient Data", row.names = FALSE,
+      col.names = c("Dataset", "No of Patients", "Total Males", "Total Females", "Males With Liver Disease", "Females With Liver Disease"))
+```
+
+## Data Visualisation
+
+The data is categorised by age, gender and whether or not a patient has been diagnosed as having liver disease. For this reason, the approach used in visualising data was to use age as the x-axis and the different blood markers as the y-axis.
+
+### Normalising the Data
+
+Firstly, the data was normalised by calculating the means and standard deviations for healthy patients (i.e. those without liver disease) for each of the blood markers treating males and females separately. 
+
+```{r base_levels, echo = FALSE}
+t3 <- base[,seq(1:7)]
+t4 <- base[,c(1,8,9)]
+t5 <- base[,c(1,10,11,12,13,16,17,18,19)]
+t6 <- base[,c(1,14,15)]
+
+kable(t3, caption = "Healthy Base Levels of Blood Enzymes", row.names = FALSE,
+       col.names = c("Gender", "Mean ALT", "Std Dev ALT","Mean AST", "Std Dev AST","Mean APT", "Std Dev APT"))
+
+kable(t4, caption = "Healthy Base Levels of AST/ALT Ratio", row.names = FALSE,
+       col.names = c("Gender", "Mean", "Std Dev"))
+
+kable(t5, caption = "Healthy Base Levels of Blood Proteins", row.names = FALSE,
+       col.names = c("Gender", "Mean TP", "Std Dev TP", "Mean ALB", "Std Dev ALB", "Mean TBIL", "Std Dev TBIL", "Mean DBI", "Std Dev DBI"))
+
+kable(t6, caption = "Healthy Base Levels of Albumin/Globulin Ratio", row.names = FALSE,
+       col.names = c("Gender", "Mean", "Std Dev"))
+```
+
+Using these "base" levels, we can calculate z-values for each patient record and blood marker. For example, the z-value of ALT for patient i of gender g is given by the formula:
+
+$\textbf {zALT}_i = (\textbf {ALT}_i - \hat {\textbf{ALT}_g}) / \textbf {sd(ALT)}_g$
+
+where $\hat {\textbf{ALT}_g}$ is `r base$Avg_ALT[1]` for females or `r base$Avg_ALT[2]` for males, and $\textbf {sd(ALT)}_g$ is `r base$Sd_ALT[1]` for females or `r base$Sd_ALT[2]`n for males.
+
+Similar formulae for the other blood markers define the z-values for patient i, namely $\textbf{zAST}_i$, $\textbf{zAPT}_i$, $\textbf{zAST:ALT}_i$, $\textbf{zTP}_i$, $\textbf{zALB}_i$, $\textbf{zAGR}_i$, $\textbf{zTBIL}_i$ and  $\textbf{zDBI}_i$.
+
+### Age Distribution of Patients
+```{r age_dist_plot, out.width='50%', fig.cap="Age Distribution of Indian Liver Patients", fig.align='center', fig.pos='H', echo = FALSE}
+include_graphics("./figs/age_distribution.png")
+```
+
+As can be seen in Figure 1, there is limited data for those aged less than 18 and greater than 77, so in order not to skew the model, we will exclude these patients while developing the model.
+
+The distribution also clearly shows that the data available for women are fewer than for men, so it may be that any model developed will not be as good at predicting the presence of liver disease for women as for men.
+
+### Blood Markers v Age
+```{r alt_age_plot, out.width='50%', fig.cap="Alamine Aminotransferase (ALT) By Age", fig.align='center', fig.pos='H', echo = FALSE}
+include_graphics("./figs/alt_age_plot.png")
+```
+
+Figure 2 shows the training set patient data for $\textbf {zALT}_i$. The grey region represents the 95% confidence interval for healthy patients with the black line representing the mean level, which is by definition zero, since these are standardised z-values. The dots represent individual patients, with the colour determining which are healthy and which are diagnosed with liver disease. 
+
+It is clear that ALT for almost all the healthy patients are clustered around the "normal" with only a few outliers. For the diagnosed liver disease patients, while many are within normal range, many, particularly males, are clearly way above the normal range.
+
+So, as clinicians suggest, this is clearly a good marker for predicting liver disease, but it does not catch all liver disease.
+
+```{r ast_age_plot, out.width='50%', fig.cap="Aspartate Aminotransferase (ALT) By Age", fig.align='center', fig.pos='H', echo = FALSE}
+include_graphics("./figs/ast_age_plot.png")
+```
+
+Figure 3 shows a similar plot for $\textbf {zAST}_i$. 
+
+The AST plot shows similar characteristics as for the plot for ALT. So again, this is a good marker for prediction, but not necessarily conclusive.
+
+```{r ast_alt_ratio_age_plot, out.width='50%', fig.cap="AST/ALT Ratio By Age", fig.align='center', fig.pos='H', echo = FALSE}
+include_graphics("./figs/ast_alt_ratio_age_plot.png")
+```
+
+Figure 4 shows the plot for $\textbf {zAST:ALT}_i$, which as was mentioned in the introduction is sometimes used by clinicians to determine alcohol-related liver disease. The plot shows however, that without further data such as alcohol consumption data for patients, this is unlikely to be a useful marker in developing our predictive model, as the vast majority of patients fall within "normal" limits. An interesting observation is however that the plot may show that rather more men than women may be showing signs of heavy alcohol consumption, with more patients outside normal range and towards the upper end of normal limits.
+
+```{r apt_age_plot, out.width='50%', fig.cap="Alkaline Phosphotase By Age", fig.align='center', fig.pos='H', echo = FALSE}
+include_graphics("./figs/apt_age_plot.png")
+```
+
+Figure 5 shows the picture for $\textbf{zAPT}_i$. It can be seen that patients with elevated levels are present throughout the age range for females amongst those diagnosed with liver disease. For males, the picture is less clear but again for the higher ages APT may be a useful marker in predicting liver disease.
+
+```{r tp_age_plot, out.width='50%', fig.cap="Total Proteins By Age", fig.align='center', fig.pos='H', echo = FALSE}
+include_graphics("./figs/tp_age_plot.png")
+```
+
+Figure 6 shows the patterns for $\textbf{zTP}_i$. Very few patients fall outside the 95% confidence interval, so, in itself, this marker is unlikely to prove useful as a predictor.
+
+```{r alb_age_plot, out.width='50%', fig.cap="Albumin By Age", fig.align='center', fig.pos='H', echo = FALSE}
+include_graphics("./figs/alb_age_plot.png")
+```
+
+Figure 7 shows the patterns for $\textbf{zALB}_i$. Here, again most patients fall within the 95% confidence interval. So again, ALB in itself is unlikely to be a useful predictor of liver disease. However, it does seem that at least for males, the majority of diagnosed liver disease patients are in the lower ranges of normal with several falling out of range.
+
+```{r agr_age_plot, out.width='50%', fig.cap="Albumin/Globulin Ratio By Age", fig.align='center', fig.pos='H', echo = FALSE}
+include_graphics("./figs/agr_age_plot.png")
+```
+
+Figure 8 shows the plot for $\textbf{zAGR}_i$. This shows a similar pattern to the Albumin plot, which is no surprise given that inherent link between the data.
+
+```{r tbil_age_plot, out.width='50%', fig.cap="Total Billirubin By Age", fig.align='center', fig.pos='H', echo = FALSE}
+include_graphics("./figs/tbil_age_plot.png")
+```
+
+Figure 9 shows the plot for $\textbf{zTBIL}_i$. Here the picture is much clearer: there are very few outliers among the healthy patients, and very many diagnosed liver disease patients who are way above the 95% confidence interval for "normal". So TBIL is likely to be a significant predictor of liver disease.
+
+```{r dbi_age_plot, out.width='50%', fig.cap="Direct Billirubin By Age", fig.align='center', fig.pos='H', echo = FALSE}
+include_graphics("./figs/dbi_age_plot.png")
+```
+
+Figure 10 shows the plot for $\textbf{zDBI}_i$. The picture here is very similiar to the picture for TBIL and the same observations are relevant. It is probable that the use of either TBIL or DBI in predictions of liver disease will yield a similar outcome.
+
+
+## Developing the Predictive Model And Results
+
+### Strategy
+
+The visualisation has shown that some of the blood markers are likely to provide more influence on predicting the presence of liver disease than others. In particular, the enzyme markers (AST, ALT, APT) seem more reliable than the protein markers (TP,ALB, AGR). The billirubin markers (TBIL and DBI) do seem to be reliable - intuitively this seems very plausible as they are responsible for the yellow colour associated with jaundice - a clear sign of problems with the liver.
+
+The strategy will be to develop two classification models, the first using "K-Nearest Neighbours" (KNN) and the second using "Random Forest" (RF).
+
+Within each model, a second subdivision will firstly be to use all z-value markers in the dataset ($\textbf{Age}_i$, $\textbf{Gender}_i$, $\textbf {zALT}_i$, $\textbf{zAST}_i$, $\textbf{zAPT}_i$, $\textbf{zTP}_i$, $\textbf{zALB}_i$, $\textbf{zAGR}_i$, $\textbf{zTBIL}_i$ and  $\textbf{zDBI}_i$), and secondly to exclude the protein markers (i.e. all except $\textbf{zTP}_i$, $\textbf{zALB}_i$, $\textbf{zAGR}_i$).
+
+### K-Nearest Neighbours (KNN)
+
+The k-nearest neighbours model seeks to predict the classification for a particual row of data in the dataset, in our case representing a patient, by identifying the k rows of data in the dataset that are "nearest" in characteristics to that row. The "distance" between the markers is used to identify how near they are, where the k rows represent the neighbourhood of the particular row. The predicted classification is then the predominant prediction from the neighbourhood.
+
+### KNN All Markers Model
+
+```{r knn_all_marker_best_k, out.width='50%', fig.cap="KNN All Markers - Best k", fig.align='center', fig.pos='H', echo = FALSE}
+include_graphics("./figs/knn_all_marker_best_k.png")
+```
+
+In this model, a range of values of k were considered between 3 and 33. As can be seen from the plot in figure 11, the optimal k was `r train_knn_all_markers$bestTune$k`.
+
+When applied to the test set data, this yielded an accuracy (% of correct predictions) of `r 100*round(cf_knn_all$overall["Accuracy"], digits=6)`%. The predictions are summarised in the following table:
+
+```{r knn_all_confusion_matrix, echo = FALSE}
+cf1<-cf_knn_all$table
+print(cf1)
+```
+This tells us that there are `r cf1[2,1]` false positives and `r cf1[1,2]` false negatives, with `r (cf1[1,1] + cf1[2,2])` matching predictions.
+
+### KNN Non-Protein Markers Model
+
+```{r knn_non_protein_marker_best_k, out.width='50%', fig.cap="KNN Non-Protein Markers - Best k", fig.align='center', fig.pos='H', echo = FALSE}
+include_graphics("./figs/knn_non_protein_marker_best_k.png")
+```
+
+In this model, a range of values of k were considered between 3 and 33. As can be seen from the plot in figure 12, the optimal k was `r train_knn_non_protein_markers$bestTune$k`.
+
+When applied to the test set data, this yielded an accuracy (% of correct predictions) of `r 100*round(cf_knn_non_protein$overall["Accuracy"], digits=6)`%. The predictions are summarised in the following table:
+
+```{r knn_non_protein_confusion_matrix, echo = FALSE}
+cf2<-cf_knn_non_protein$table
+print(cf2)
+```
+This tells us that there are `r cf2[2,1]` false positives and `r cf2[1,2]` false negatives, with `r (cf2[1,1] + cf2[2,2])` matching predictions.
+
+### Random Forest (RF)
+
+The random forest model is essentially a development of a decision tree model. 
+
+In a decision tree, a prediction is made by looking at different data markers in turn. A binary choice is made at each node of the tree and eventually a prediction is made. The optimum order of markers is difficult to determine particularly where there are very many markers.
+
+In the random forest method, the predictions from multiple randomly chosen decision trees are examined to give the "best" prediction. For classification models such as this one, the majority prediction amongst the decision trees is chosen.
+
+Randomness is generated firstly by choosing multiple samples of N rows of the training dataset to create the trees, and randomly choosing the "features" (in our case the blood markers) included in each tree.
+
+From the forest of decision trees the majority prediction is chosen for each row (or patient).
+
+### RF All Markers Model
+```{r rf_all_markers_best_no_predictors, out.width='50%', fig.cap="RF All Markers - Optimum No of Randomly Selected Predictors", fig.align='center', fig.pos='H', echo = FALSE}
+include_graphics("./figs/rf_all_markers_best_no_predictors.png")
+```
+
+In this model, we optimised for the best number of markers to include in each tree in the range 2 to 7. As can be seen from the plot in figure 11, the optimal number of markers is `r train_rf_all_markers$bestTune$mtry`. We also set the node size to 14.
+
+When applied to the test set data, this yielded an accuracy (% of correct predictions) of `r 100*round(cf_rf_all$overall["Accuracy"], digits=6)`%. The predictions are summarised in the following table:
+
+```{r rf_all_confusion_matrix, echo = FALSE}
+cf3<-cf_rf_all$table
+print(cf3)
+```
+This tells us that there are `r cf3[2,1]` false positives and `r cf3[1,2]` false negatives, with `r (cf3[1,1] + cf3[2,2])` matching predictions.
+
+
+### RF No Protein Markers Model
+
+```{r rf_non_protein_markers_best_no_predictors, out.width='50%', fig.cap="RF Non-Protein Markers - Optimum No of Randomly Selected Predictors", fig.align='center', fig.pos='H', echo = FALSE}
+include_graphics("./figs/rf_non_protein_markers_best_no_predictors.png")
+```
+
+In this model, we optimised for the best number of markers to include in each tree in the range 2 to 7. As can be seen from the plot in figure 11, the optimal number of markers is `r train_rf_non_protein_markers$bestTune$mtry`. We also set the node size to 14.
+
+When applied to the test set data, this yielded an accuracy (% of correct predictions) of `r 100*round(cf_rf_non_protein$overall["Accuracy"], digits=6)`%. The predictions are summarised in the following table:
+
+```{r rf_non_protein_confusion_matrix, echo = FALSE}
+cf4<-cf_rf_non_protein$table
+print(cf4)
+```
+This tells us that there are `r cf4[2,1]` false positives and `r cf4[1,2]` false negatives, with `r (cf4[1,1] + cf4[2,2])` matching predictions.
+
+# Conclusion
+
+It can be seen from the analysis and results in the last section that the most accurate model of the four examined is the Random Forest model where only the Non-Protein markers are considered.
+
+It not only provides the highest accuracy for the test dataset at `r 100*round(cf_rf_non_protein$overall["Accuracy"], digits=6)`%, but also has the smallest number of both false positives (`r cf4[2,1]`) and false negatives (`r cf4[1,2]`).
+
+There is certainly scope for improving this model. Indeed as it would be used in clinical environments, it would be useful to have some parameters set as to what the criteria are for a "good" model. Is overall accuracy the metric to use, or would minimising false negatives be a better metric? Should the predictions include a "Not sure" diagnosis to cater for those patients where the decision is borderline?
+
+It is certainly interesting that the blood protein markers, that is Albumin, Total Proteins and the Albumin/Globulin Ratio, does not seem to be useful in improving the acccuracy of the predictions.
+
+In the introduction it was mentioned that the AST/ALT Ratio is used as an indicator of alcohol-related liver disease. Perhaps a future study should also gather data about lifestyle markers such as alcohol consumption to further to see if that would improve predictions.
+
+The Indian Liver Patients dataset is relatively small, and as such the accuracy of a predictive model is unlikely to be sufficient in a clinical setting to correctly diagnose liver disease. As a tool to suggest further patient investigations it may be useful, but certainly should not be regarded as foolproof.
+
+
+
+
